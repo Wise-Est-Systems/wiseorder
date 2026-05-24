@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wiseorder-postgres
+    environment:
+      POSTGRES_USER: wiseorder
+      POSTGRES_PASSWORD: wiseorder
+      POSTGRES_DB: wiseorder
+    ports:
+      - "5433:5432"
+    volumes:
+      - wiseorder_pg_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wiseorder -d wiseorder"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: wiseorder-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - wiseorder_redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  wiseorder_pg_data:
+  wiseorder_redis_data:
