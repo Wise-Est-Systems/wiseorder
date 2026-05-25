@@ -17,6 +17,8 @@ from core.queues.redis_queue import Job
 
 log = get_logger(__name__)
 
+MAX_DIFF_BYTES = 200_000
+
 
 @dataclass
 class GitCommitEvent:
@@ -28,7 +30,11 @@ class GitCommitEvent:
 
 
 class _GitHeadHandler(FileSystemEventHandler):
-    """Watches `.git/HEAD` / `.git/refs/heads/*` / `.git/logs/HEAD` for commit changes."""
+    """Watches `.git/HEAD` / `.git/refs/heads/*` / `.git/logs/HEAD` for commit changes.
+
+    Recursive=True is wasteful (fires on every git internal write) but correct;
+    we filter post-hoc. See FAILURE_MODEL.md / RUNTIME_INVARIANTS.md.
+    """
 
     def __init__(self, watcher: "EventWatcher", repo_path: Path) -> None:
         super().__init__()
@@ -46,10 +52,23 @@ class _GitHeadHandler(FileSystemEventHandler):
         if new_sha and new_sha != self._last_sha:
             prev = self._last_sha
             self._last_sha = new_sha
-            asyncio.run_coroutine_threadsafe(
-                self.watcher._emit_commit(self.repo_path, prev, new_sha),
-                self.watcher.loop,
-            )
+            loop = self.watcher.loop
+            if loop is None or loop.is_closed():
+                log.warning(
+                    {"msg": "watcher_skip_event_loop_unavailable",
+                     "repo": str(self.repo_path), "sha": new_sha}
+                )
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.watcher._emit_commit(self.repo_path, prev, new_sha),
+                    loop,
+                )
+            except RuntimeError as e:
+                log.warning(
+                    {"msg": "watcher_schedule_failed",
+                     "repo": str(self.repo_path), "sha": new_sha, "err": str(e)}
+                )
 
 
 def _current_head_sha(repo: Path) -> str | None:
@@ -59,35 +78,44 @@ def _current_head_sha(repo: Path) -> str | None:
             stderr=subprocess.DEVNULL,
         )
         return out.decode().strip()
-    except Exception:
+    except FileNotFoundError:
+        log.error({"msg": "git_missing_from_path", "repo": str(repo)})
+        return None
+    except subprocess.CalledProcessError as e:
+        log.warning({"msg": "git_rev_parse_failed", "repo": str(repo), "rc": e.returncode})
         return None
 
 
 def _read_commit(repo: Path, sha: str) -> tuple[str, str, str]:
-    """Return (author, subject, diff)."""
+    """Return (author, subject, diff). Failures in git invocation are logged and
+    surface as empty fields; the workflow can still proceed (the LLM will
+    summarize what it has) but the operator sees the failure in logs."""
+    author = "unknown"
+    subject = ""
+    diff = ""
     try:
         author = subprocess.check_output(
             ["git", "-C", str(repo), "log", "-1", "--format=%an <%ae>", sha],
             stderr=subprocess.DEVNULL,
         ).decode().strip()
-    except Exception:
-        author = "unknown"
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        log.warning({"msg": "git_log_author_failed", "sha": sha, "err": str(e)})
     try:
         subject = subprocess.check_output(
             ["git", "-C", str(repo), "log", "-1", "--format=%s", sha],
             stderr=subprocess.DEVNULL,
         ).decode().strip()
-    except Exception:
-        subject = ""
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        log.warning({"msg": "git_log_subject_failed", "sha": sha, "err": str(e)})
     try:
         diff = subprocess.check_output(
             ["git", "-C", str(repo), "show", "--stat", "--patch", sha],
             stderr=subprocess.DEVNULL,
         ).decode(errors="replace")
-        if len(diff) > 200_000:
-            diff = diff[:200_000] + "\n\n[diff truncated]\n"
-    except Exception:
-        diff = ""
+        if len(diff) > MAX_DIFF_BYTES:
+            diff = diff[:MAX_DIFF_BYTES] + "\n\n[diff truncated]\n"
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        log.warning({"msg": "git_show_failed", "sha": sha, "err": str(e)})
     return author, subject, diff
 
 
@@ -102,6 +130,7 @@ class EventWatcher:
         configured = list(paths) if paths is not None else list(s.watch_paths)
         self.repos: list[Path] = [Path(p).expanduser().resolve() for p in configured]
         self._observer: Observer | None = None
+        self._handlers: list[_GitHeadHandler] = []
         self.loop: asyncio.AbstractEventLoop | None = None
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -116,9 +145,38 @@ class EventWatcher:
                 continue
             handler = _GitHeadHandler(self, repo)
             observer.schedule(handler, str(repo / ".git"), recursive=True)
+            self._handlers.append(handler)
             log.info({"msg": "event_watcher_watching", "path": str(repo)})
         observer.start()
         self._observer = observer
+        self._reconcile_after_start()
+
+    def _reconcile_after_start(self) -> None:
+        """Close the init-to-start gap: re-read HEAD after the observer is live.
+
+        Any commits that landed between handler construction and observer.start()
+        would otherwise be missed. We re-read HEAD now and if it has moved,
+        synthesize an event so the workflow still runs.
+        """
+        loop = self.loop
+        if loop is None:
+            return
+        for handler in self._handlers:
+            current = _current_head_sha(handler.repo_path)
+            if current and current != handler._last_sha:
+                prev = handler._last_sha
+                handler._last_sha = current
+                log.info(
+                    {"msg": "watcher_init_gap_reconciled",
+                     "repo": str(handler.repo_path), "prev": prev, "sha": current}
+                )
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._emit_commit(handler.repo_path, prev, current),
+                        loop,
+                    )
+                except RuntimeError as e:
+                    log.warning({"msg": "watcher_reconcile_schedule_failed", "err": str(e)})
 
     def stop(self) -> None:
         if self._observer is not None:

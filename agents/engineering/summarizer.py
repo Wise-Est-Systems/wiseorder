@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+import litellm
 from litellm import acompletion
 
 from configs.logging import get_logger
@@ -29,7 +31,10 @@ class EngineeringSummary:
 
 class EngineeringSummarizer:
     def __init__(self, model: str | None = None) -> None:
-        self.model = model or get_settings().llm_model
+        s = get_settings()
+        self.model = model or s.llm_model
+        self.timeout = s.llm_timeout_seconds
+        self.max_retries = s.llm_max_retries
         self._template = PROMPT_PATH.read_text(encoding="utf-8")
 
     async def summarize(
@@ -44,15 +49,16 @@ class EngineeringSummarizer:
             self._template.replace("{{subject}}", subject)
             .replace("{{author}}", author)
             .replace("{{sha}}", sha)
-            .replace("{{diff}}", diff[:120_000])
+            .replace("{{diff}}", diff)
         )
-        resp = await acompletion(
+        content = await _llm_call(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            prompt=prompt,
             temperature=0.2,
             max_tokens=1024,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
         )
-        content = resp["choices"][0]["message"]["content"].strip()
         data = _parse_json(content)
 
         return EngineeringSummary(
@@ -61,6 +67,41 @@ class EngineeringSummarizer:
             changelog=str(data.get("changelog", "")).strip(),
             risk_level=_normalize_risk(data.get("risk_level", "low")),
         )
+
+
+async def _llm_call(
+    *,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+    timeout: float,
+    max_retries: int,
+) -> str:
+    """Bounded LLM call with explicit timeout and bounded retries on transient errors."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            resp = await asyncio.wait_for(
+                acompletion(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ),
+                timeout=timeout,
+            )
+            return resp["choices"][0]["message"]["content"].strip()
+        except asyncio.TimeoutError:
+            log.warning({"msg": "llm_timeout", "model": model, "attempt": attempt, "timeout_s": timeout})
+            if attempt > max_retries:
+                raise
+        except (litellm.RateLimitError, litellm.APIConnectionError, litellm.ServiceUnavailableError) as e:
+            log.warning({"msg": "llm_transient", "model": model, "attempt": attempt, "err": str(e)})
+            if attempt > max_retries:
+                raise
+            await asyncio.sleep(min(2 ** attempt, 30))
 
 
 def _parse_json(content: str) -> dict:

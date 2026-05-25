@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from litellm import acompletion
-
+from agents.engineering.summarizer import _llm_call
 from configs.logging import get_logger
 from configs.settings import get_settings
 
@@ -24,7 +23,10 @@ class SocialDraft:
 
 class SocialDrafter:
     def __init__(self, model: str | None = None) -> None:
-        self.model = model or get_settings().llm_model
+        s = get_settings()
+        self.model = model or s.llm_model
+        self.timeout = s.llm_timeout_seconds
+        self.max_retries = s.llm_max_retries
         self._template = PROMPT_PATH.read_text(encoding="utf-8")
 
     async def draft(self, *, summary: str, changelog: str, risk_level: str) -> SocialDraft:
@@ -33,13 +35,14 @@ class SocialDrafter:
             .replace("{{changelog}}", changelog)
             .replace("{{risk_level}}", risk_level)
         )
-        resp = await acompletion(
+        content = await _llm_call(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            prompt=prompt,
             temperature=0.3,
             max_tokens=320,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
         )
-        content = resp["choices"][0]["message"]["content"].strip()
         content = content.strip('"').strip("'").strip()
         if len(content) > 280:
             content = content[:277] + "..."

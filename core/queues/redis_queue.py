@@ -89,7 +89,10 @@ class RedisQueue:
         return Job.from_json(blob)
 
     async def fail(self, job: Job, error: str) -> None:
-        job.notes.append(f"failed: {error}")
+        job.attempt += 1
+        job.notes.append(
+            f"{datetime.now(timezone.utc).isoformat()} failed (attempt={job.attempt}): {error}"
+        )
         c = await self.client()
         await c.rpush(QueueName.FAILED.value, job.to_json())
 

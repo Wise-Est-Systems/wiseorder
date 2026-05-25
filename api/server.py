@@ -8,10 +8,10 @@ from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 
 from core.approvals.gateway import get_gateway
-from core.memory.db import session_scope
+from core.memory.db import ping as db_ping, session_scope
 from core.memory.models import Approval, Memory, Task, Workflow
 from core.memory.vector import get_vector_store
-from core.queues import get_queue
+from core.queues import QueueName, get_queue
 
 
 if TYPE_CHECKING:
@@ -35,12 +35,23 @@ def build_app(orch: "Orchestrator") -> FastAPI:
         return _DASHBOARD_HTML
 
     @app.get("/health")
+    @app.get("/healthz")
     async def health() -> dict:
         q = await get_queue()
         return {
             "redis": await q.ping(),
             "queue_depths": await q.all_depths(),
         }
+
+    @app.get("/ready")
+    async def ready():
+        q = await get_queue()
+        db_ok = await db_ping()
+        redis_ok = await q.ping()
+        body = {"database": db_ok, "redis": redis_ok}
+        if not (db_ok and redis_ok):
+            return JSONResponse(status_code=503, content=body)
+        return body
 
     @app.get("/tasks")
     async def list_tasks(status: str | None = None, limit: int = 50) -> list[dict]:
@@ -52,23 +63,27 @@ def build_app(orch: "Orchestrator") -> FastAPI:
             return [_task_dict(r) for r in rows]
 
     @app.get("/workflows")
-    async def list_workflows(limit: int = 50) -> list[dict]:
+    async def list_workflows(
+        limit: int = 50, status: str | None = None
+    ) -> list[dict]:
         async with session_scope() as session:
             stmt = select(Workflow).order_by(desc(Workflow.id)).limit(limit)
+            if status:
+                stmt = stmt.where(Workflow.status == status)
             rows = (await session.execute(stmt)).scalars().all()
             return [_wf_dict(r) for r in rows]
 
     @app.get("/workflows/{wf_id}")
     async def get_workflow(wf_id: int) -> dict:
         async with session_scope() as session:
-            res = await session.execute(select(Workflow).where(Workflow.id == wf_id))
-            wf = res.scalar_one_or_none()
+            wf = (await session.execute(
+                select(Workflow).where(Workflow.id == wf_id)
+            )).scalar_one_or_none()
             if wf is None:
                 raise HTTPException(404, "workflow not found")
-            tasks_res = await session.execute(
+            tasks = (await session.execute(
                 select(Task).where(Task.workflow_id == wf_id).order_by(Task.id)
-            )
-            tasks = tasks_res.scalars().all()
+            )).scalars().all()
             return {**_wf_dict(wf), "tasks": [_task_dict(t) for t in tasks]}
 
     @app.get("/approvals")
@@ -89,19 +104,17 @@ def build_app(orch: "Orchestrator") -> FastAPI:
 
     @app.get("/memory/search")
     async def memory_search(q: str, n: int = 5) -> list[dict]:
-        vs = get_vector_store()
-        return vs.query(q, n_results=n)
+        return get_vector_store().query(q, n_results=n)
 
     @app.get("/memory/recent")
     async def memory_recent(limit: int = 20) -> list[dict]:
         async with session_scope() as session:
-            stmt = select(Memory).order_by(desc(Memory.id)).limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            rows = (await session.execute(
+                select(Memory).order_by(desc(Memory.id)).limit(limit)
+            )).scalars().all()
             return [
                 {
-                    "id": r.id,
-                    "category": r.category,
-                    "content": r.content,
+                    "id": r.id, "category": r.category, "content": r.content,
                     "metadata": r.meta,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
@@ -111,8 +124,9 @@ def build_app(orch: "Orchestrator") -> FastAPI:
     @app.get("/logs/recent")
     async def logs_recent(limit: int = 100) -> list[dict]:
         async with session_scope() as session:
-            stmt = select(Workflow).order_by(desc(Workflow.id)).limit(20)
-            rows = (await session.execute(stmt)).scalars().all()
+            rows = (await session.execute(
+                select(Workflow).order_by(desc(Workflow.id)).limit(20)
+            )).scalars().all()
             entries: list[dict] = []
             for r in rows:
                 for entry in r.logs[-10:]:
@@ -120,17 +134,35 @@ def build_app(orch: "Orchestrator") -> FastAPI:
             entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
             return entries[:limit]
 
+    @app.get("/queues/failed")
+    async def queues_failed(limit: int = 50) -> list[dict]:
+        """Dead-letter inspection. Returns failed jobs with their last error
+        and original payload so an operator can decide whether to investigate,
+        replay, or discard."""
+        q = await get_queue()
+        jobs = await q.peek_failed(limit)
+        return [
+            {
+                "id": j.id, "type": j.type, "attempt": j.attempt,
+                "created_at": j.created_at, "notes": j.notes,
+                "payload": j.payload,
+            }
+            for j in jobs
+        ]
+
     @app.get("/stats")
     async def stats() -> dict:
         async with session_scope() as session:
-            res = await session.execute(
-                select(Task.status, func.count(Task.id)).group_by(Task.status)
-            )
-            task_counts = {row[0]: int(row[1]) for row in res.all()}
-            res = await session.execute(
-                select(Workflow.status, func.count(Workflow.id)).group_by(Workflow.status)
-            )
-            wf_counts = {row[0]: int(row[1]) for row in res.all()}
+            task_counts = {
+                row[0]: int(row[1]) for row in (await session.execute(
+                    select(Task.status, func.count(Task.id)).group_by(Task.status)
+                )).all()
+            }
+            wf_counts = {
+                row[0]: int(row[1]) for row in (await session.execute(
+                    select(Workflow.status, func.count(Workflow.id)).group_by(Workflow.status)
+                )).all()
+            }
         q = await get_queue()
         return {
             "tasks": task_counts,
@@ -156,13 +188,9 @@ def _safe_vector_count() -> int:
 
 def _task_dict(t: Task) -> dict:
     return {
-        "id": t.id,
-        "type": t.type,
-        "status": t.status,
-        "workflow_id": t.workflow_id,
-        "payload": t.payload,
-        "result": t.result,
-        "error": t.error,
+        "id": t.id, "type": t.type, "status": t.status,
+        "workflow_id": t.workflow_id, "payload": t.payload,
+        "result": t.result, "error": t.error,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "completed_at": t.completed_at.isoformat() if t.completed_at else None,
     }
@@ -170,11 +198,8 @@ def _task_dict(t: Task) -> dict:
 
 def _wf_dict(w: Workflow) -> dict:
     return {
-        "id": w.id,
-        "workflow_name": w.workflow_name,
-        "status": w.status,
-        "task_chain": w.task_chain,
-        "logs": w.logs,
+        "id": w.id, "workflow_name": w.workflow_name, "status": w.status,
+        "task_chain": w.task_chain, "logs": w.logs,
         "created_at": w.created_at.isoformat() if w.created_at else None,
         "completed_at": w.completed_at.isoformat() if w.completed_at else None,
     }
@@ -182,14 +207,9 @@ def _wf_dict(w: Workflow) -> dict:
 
 def _approval_dict(a: Approval) -> dict:
     return {
-        "id": a.id,
-        "workflow_id": a.workflow_id,
-        "task_id": a.task_id,
-        "summary": a.summary,
-        "outputs": a.outputs,
-        "affected": a.affected,
-        "risk_level": a.risk_level,
-        "decision": a.decision,
+        "id": a.id, "workflow_id": a.workflow_id, "task_id": a.task_id,
+        "summary": a.summary, "outputs": a.outputs, "affected": a.affected,
+        "risk_level": a.risk_level, "decision": a.decision,
         "delivered_via": a.delivered_via,
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "decided_at": a.decided_at.isoformat() if a.decided_at else None,
@@ -212,6 +232,9 @@ button:hover{background:#243140}
 .risk-low{color:#5fd28f}
 .risk-medium{color:#f5c065}
 .risk-high{color:#ff7a7a}
+.s-failed,.s-interrupted{color:#ff7a7a}
+.s-completed{color:#5fd28f}
+.s-running{color:#7aa7ff}
 input{background:#11161c;border:1px solid #2a3a4d;color:#dde2e7;padding:6px 8px;border-radius:4px;font-family:inherit;width:100%;box-sizing:border-box}
 </style></head>
 <body>
@@ -219,6 +242,8 @@ input{background:#11161c;border:1px solid #2a3a4d;color:#dde2e7;padding:6px 8px;
 <div id="stats" class="grid"></div>
 <h2>PENDING APPROVALS</h2>
 <div id="approvals"></div>
+<h2>DEAD-LETTER (FAILED JOBS)</h2>
+<div id="failed"></div>
 <h2>RECENT WORKFLOWS</h2>
 <div id="workflows"></div>
 <h2>RECENT TASKS</h2>
@@ -230,7 +255,6 @@ input{background:#11161c;border:1px solid #2a3a4d;color:#dde2e7;padding:6px 8px;
 <div id="logs"></div>
 <script>
 async function j(u,o){return (await fetch(u,o)).json()}
-function el(html){const d=document.createElement('div');d.innerHTML=html;return d.firstElementChild}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function refresh(){
   const s=await j('/stats')
@@ -250,12 +274,17 @@ async function refresh(){
         <button onclick="decide(${a.id},'rejected')">reject</button>
       </div>
     </div>`).join(''):'<div class="card k">none pending</div>'
+  const fl=await j('/queues/failed?limit=10')
+  document.getElementById('failed').innerHTML=fl.length?fl.map(f=>`
+    <div class="card"><b>${esc(f.type)}</b> id=${esc(f.id)} attempt=${f.attempt}
+      <pre>${esc((f.notes||[]).join('\\n'))}</pre>
+    </div>`).join(''):'<div class="card k">none</div>'
   const wf=await j('/workflows?limit=10')
   document.getElementById('workflows').innerHTML=wf.map(w=>`
-    <div class="card"><b>#${w.id}</b> ${esc(w.workflow_name)} — ${esc(w.status)} <span class="k">${esc(w.created_at||'')}</span></div>`).join('')
+    <div class="card"><b>#${w.id}</b> ${esc(w.workflow_name)} — <span class="s-${w.status}">${esc(w.status)}</span> <span class="k">${esc(w.created_at||'')}</span></div>`).join('')
   const ts=await j('/tasks?limit=15')
   document.getElementById('tasks').innerHTML=ts.map(t=>`
-    <div class="card"><b>#${t.id}</b> ${esc(t.type)} — ${esc(t.status)} ${t.error?'<pre class="risk-high">'+esc(t.error)+'</pre>':''}</div>`).join('')
+    <div class="card"><b>#${t.id}</b> ${esc(t.type)} — <span class="s-${t.status}">${esc(t.status)}</span> ${t.error?'<pre class="risk-high">'+esc(t.error)+'</pre>':''}</div>`).join('')
   const lg=await j('/logs/recent?limit=20')
   document.getElementById('logs').innerHTML=lg.map(l=>`
     <div class="card"><span class="k">${esc(l.ts||'')}</span> wf#${l.workflow_id} <b>${esc(l.event)}</b> <pre>${esc(JSON.stringify(l.data))}</pre></div>`).join('')

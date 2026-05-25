@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import List
 
@@ -23,6 +24,8 @@ class Settings(BaseSettings):
     chroma_path: str = str(REPO_ROOT / "data" / "chroma")
 
     llm_model: str = "claude-sonnet-4-6"
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 2
 
     discord_webhook_url: str = ""
     telegram_bot_token: str = ""
@@ -36,6 +39,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: str = str(REPO_ROOT / "logs")
 
+    orphan_workflow_max_age_seconds: int = 600
+
     @field_validator("watch_paths", mode="before")
     @classmethod
     def _split_paths(cls, v):
@@ -47,12 +52,18 @@ class Settings(BaseSettings):
 
 
 _settings: Settings | None = None
+_settings_lock = threading.Lock()
 
 
 def get_settings() -> Settings:
     global _settings
-    if _settings is None:
-        _settings = Settings()
-        Path(_settings.log_dir).mkdir(parents=True, exist_ok=True)
-        Path(_settings.chroma_path).mkdir(parents=True, exist_ok=True)
-    return _settings
+    if _settings is not None:
+        return _settings
+    with _settings_lock:
+        if _settings is not None:
+            return _settings
+        s = Settings()
+        Path(s.log_dir).mkdir(parents=True, exist_ok=True)
+        Path(s.chroma_path).mkdir(parents=True, exist_ok=True)
+        _settings = s
+        return _settings

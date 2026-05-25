@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Iterable
 
 import chromadb
@@ -9,10 +10,14 @@ from configs.settings import get_settings
 
 
 class VectorStore:
-    """Thin async-safe wrapper around an embedded persistent ChromaDB.
+    """Thin wrapper around an embedded persistent ChromaDB.
 
-    Uses Chroma's default embedding function (all-MiniLM-L6-v2 downloaded on first use).
-    Stays local — no external server, no network beyond first model fetch.
+    `upsert` is used instead of `add` so re-processing a commit (e.g., after a
+    retry or a duplicate event) does not raise IDAlreadyExists.
+
+    Uses Chroma's default embedding function (all-MiniLM-L6-v2 downloaded on
+    first use). Stays local — no external server, no network beyond first
+    model fetch.
     """
 
     def __init__(self, path: str | None = None, collection: str = "wiseorder") -> None:
@@ -23,13 +28,13 @@ class VectorStore:
         )
         self._collection = self._client.get_or_create_collection(name=collection)
 
-    def add(
+    def upsert(
         self,
         ids: list[str],
         documents: list[str],
         metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
+        self._collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
     def query(self, text: str, n_results: int = 5) -> list[dict[str, Any]]:
         res = self._collection.query(query_texts=[text], n_results=n_results)
@@ -57,10 +62,14 @@ class VectorStore:
 
 
 _store: VectorStore | None = None
+_store_lock = threading.Lock()
 
 
 def get_vector_store() -> VectorStore:
     global _store
-    if _store is None:
-        _store = VectorStore()
-    return _store
+    if _store is not None:
+        return _store
+    with _store_lock:
+        if _store is None:
+            _store = VectorStore()
+        return _store
