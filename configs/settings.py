@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     log_dir: str = str(REPO_ROOT / "logs")
 
     orphan_workflow_max_age_seconds: int = 600
+    dedup_ttl_seconds: int = 3600
+
+    api_allow_remote_bind: bool = False
+    api_auth_token: str = ""
 
     @field_validator("watch_paths", mode="before")
     @classmethod

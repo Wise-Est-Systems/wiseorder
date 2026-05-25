@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from agents.engineering.summarizer import EngineeringSummarizer
 from agents.social.post_generator import SocialDrafter
@@ -13,6 +12,7 @@ from core.approvals.gateway import ApprovalRequest, get_gateway
 from core.memory.db import session_scope
 from core.memory.models import Memory, Task, Workflow
 from core.memory.vector import get_vector_store
+from core.queues import dedup_acquire, dedup_attach
 
 
 log = get_logger(__name__)
@@ -21,8 +21,11 @@ log = get_logger(__name__)
 async def run_commit_pipeline(payload: dict[str, Any]) -> dict[str, Any]:
     """Event → summarize → draft social → save → approval request.
 
-    Idempotent on (repo, sha): if a workflow for this commit is already
-    running or completed, returns its workflow_id and skips re-processing.
+    Idempotent on (repo, sha) via Redis SETNX (atomic across processes).
+    A claim is held for ``WISEORDER_DEDUP_TTL_SECONDS`` (default 3600). If a
+    duplicate event arrives while the original is in flight or within the
+    TTL window after completion, this function returns the existing
+    workflow_id with ``skipped=True``.
 
     payload keys: repo, sha, prev_sha, author, subject, diff
     """
@@ -33,11 +36,23 @@ async def run_commit_pipeline(payload: dict[str, Any]) -> dict[str, Any]:
     author = payload.get("author", "")
     diff = payload.get("diff", "")
 
-    existing = await _find_existing_workflow(repo, sha)
-    if existing is not None:
-        log.info({"msg": "commit_pipeline_idempotent_skip",
-                  "existing_workflow_id": existing, "sha": sha, "repo": repo})
-        return {"workflow_id": existing, "skipped": True, "reason": "duplicate_sha"}
+    claim = await dedup_acquire(repo, sha)
+    if not claim.acquired:
+        existing_value = claim.existing_value or "unknown"
+        existing_workflow_id: int | None = None
+        if existing_value.isdigit():
+            existing_workflow_id = int(existing_value)
+        log.info({
+            "msg": "commit_pipeline_idempotent_skip",
+            "existing_value": existing_value,
+            "existing_workflow_id": existing_workflow_id,
+            "sha": sha, "repo": repo,
+        })
+        return {
+            "workflow_id": existing_workflow_id,
+            "skipped": True,
+            "reason": "in_flight" if existing_value == "PENDING" else "duplicate_sha",
+        }
 
     async with session_scope() as session:
         wf = Workflow(
@@ -49,6 +64,8 @@ async def run_commit_pipeline(payload: dict[str, Any]) -> dict[str, Any]:
         session.add(wf)
         await session.flush()
         workflow_id = wf.id
+
+    await dedup_attach(repo, sha, workflow_id)
 
     token = bind_workflow(workflow_id)
     try:
@@ -182,28 +199,6 @@ def _require_keys(payload: dict[str, Any], required: set[str]) -> None:
     missing = required - payload.keys()
     if missing:
         raise ValueError(f"commit_pipeline payload missing required keys: {sorted(missing)}")
-
-
-async def _find_existing_workflow(repo: str, sha: str) -> int | None:
-    """Return workflow_id if a running/completed workflow for (repo, sha) exists, else None.
-
-    Uses the JSONB @> containment operator against the workflow's first log
-    entry, which holds {"event": "workflow_started", "data": {"repo": ..., "sha": ...}}.
-    """
-    marker = json.dumps([{"data": {"sha": sha, "repo": repo}}])
-    async with session_scope() as session:
-        res = await session.execute(
-            text(
-                "SELECT id FROM workflows "
-                "WHERE workflow_name = 'commit_pipeline' "
-                "  AND logs @> CAST(:marker AS jsonb) "
-                "  AND status IN ('running', 'completed') "
-                "ORDER BY id ASC LIMIT 1"
-            ),
-            {"marker": marker},
-        )
-        row = res.first()
-        return int(row[0]) if row else None
 
 
 async def _append_log(workflow_id: int, entry: dict[str, Any]) -> None:
