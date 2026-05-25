@@ -133,21 +133,36 @@ def build_app(orch: "Orchestrator") -> FastAPI:
     async def watchers_status() -> dict:
         """Status of background watchers running inside the orchestrator.
 
-        Today returns IntegrityWatcher state (poll history + current head).
+        Returns IntegrityWatcher (chain poll) + CIWatcher (GitHub Actions).
         """
+        out: dict[str, Any] = {}
+
         iw = getattr(orch, "integrity_watcher", None)
         if iw is None:
-            return {"integrity_watcher": {"status": "not_running", "history": []}}
-        history = [h.to_dict() for h in iw.history[-20:]]
-        return {
-            "integrity_watcher": {
+            out["integrity_watcher"] = {"status": "not_running", "history": []}
+        else:
+            out["integrity_watcher"] = {
                 "status": "running",
                 "chain_dir": str(iw.chain_dir),
                 "interval_seconds": iw.interval_seconds,
                 "last_known_head": iw.last_head,
-                "history": history,
+                "history": [h.to_dict() for h in iw.history[-20:]],
             }
-        }
+
+        ci = getattr(orch, "ci_watcher", None)
+        if ci is None:
+            out["ci_watcher"] = {"status": "not_running", "history": {}}
+        else:
+            per_repo = {}
+            for repo, hist in ci.history.items():
+                per_repo[repo] = [c.to_dict() for c in hist[-10:]]
+            out["ci_watcher"] = {
+                "status": "running",
+                "repos": ci.repos,
+                "interval_seconds": ci.interval_seconds,
+                "history": per_repo,
+            }
+        return out
 
     @app.get("/summary/latest")
     async def latest_daily_summary() -> dict:

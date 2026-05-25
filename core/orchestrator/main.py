@@ -37,11 +37,14 @@ class Orchestrator:
         self._workers: list[asyncio.Task] = []
         self._watcher: EventWatcher | None = None
         self.integrity_watcher: IntegrityWatcher | None = None  # exposed for dashboard
+        self.ci_watcher: CIWatcher | None = None                 # exposed for dashboard
         self._integrity_task: asyncio.Task | None = None
+        self._ci_task: asyncio.Task | None = None
         self._daily_summary_task: asyncio.Task | None = None
         self._api_server: uvicorn.Server | None = None
         self._api_task: asyncio.Task | None = None
         self.register("commit_pipeline", run_commit_pipeline)
+        self.register("demo_request", run_demo_forge_request)
 
     def register(self, job_type: str, fn: HandlerFn) -> None:
         self._handlers[job_type] = fn
@@ -130,11 +133,15 @@ class Orchestrator:
         self._watcher = EventWatcher()
         self._watcher.start(loop)
 
-        # Background services: integrity watcher (polls protocol chain) +
-        # daily-summary scheduler (writes one summary per UTC day).
+        # Background services: integrity watcher (polls protocol chain),
+        # CI watcher (polls GitHub Actions), daily-summary scheduler.
         self.integrity_watcher = IntegrityWatcher()
         self._integrity_task = asyncio.create_task(
             self.integrity_watcher.run(), name="integrity-watcher"
+        )
+        self.ci_watcher = CIWatcher()
+        self._ci_task = asyncio.create_task(
+            self.ci_watcher.run(), name="ci-watcher"
         )
         self._daily_summary_task = asyncio.create_task(
             schedule_daily_summary(), name="daily-summary-scheduler"
@@ -150,8 +157,12 @@ class Orchestrator:
             self._watcher.stop()
         if self.integrity_watcher is not None:
             self.integrity_watcher.stop()
+        if self.ci_watcher is not None:
+            self.ci_watcher.stop()
         if self._integrity_task is not None:
             self._integrity_task.cancel()
+        if self._ci_task is not None:
+            self._ci_task.cancel()
         if self._daily_summary_task is not None:
             self._daily_summary_task.cancel()
         if self._api_server is not None:
@@ -164,7 +175,7 @@ class Orchestrator:
         if self._workers:
             await asyncio.gather(*self._workers, return_exceptions=True)
         # Await the background tasks to actually exit (they cancel cleanly)
-        for t in (self._integrity_task, self._daily_summary_task):
+        for t in (self._integrity_task, self._ci_task, self._daily_summary_task):
             if t is not None:
                 try:
                     await asyncio.wait_for(t, timeout=3)

@@ -259,25 +259,31 @@ def _count_recent_error_lines(log_dir: str) -> int:
 
 
 def _format_summary(s: DailyStats, now: datetime) -> str:
-    """Render the stats as a plain-English narrative. No jargon dumping.
+    """Render the stats in five named sections per OP-4 (rc2 hardening):
 
-    The reader is an operator scanning their morning. The summary should
-    be readable in ~15 seconds and end with a recommended-action line
-    when there is one.
+        1. What changed       — counts of completed/failed/interrupted/running
+        2. What failed        — failure shapes + recent error count
+        3. What matters most  — prioritized by operational urgency
+        4. Recommended next   — single action keyed to the most urgent gap
+        5. Approval backlog   — pending + decided ratio
+
+    Empty sections collapse to one line ("nothing.") so the format
+    stays stable for grep / dashboard rendering.
     """
-    lines: list[str] = []
-    lines.append(f"WiseOrder daily summary — {now.strftime('%Y-%m-%d')} (last 24 hours).")
-    lines.append("")
-
-    # Headline: workflows + approvals
     completed = s.workflows_completed
     failed = s.workflows_failed
     interrupted = s.workflows_interrupted
     running = s.workflows_running
     pending_approvals = s.approvals_pending
 
-    if completed == 0 and failed == 0 and interrupted == 0:
-        lines.append("No workflows ran. The runtime was idle.")
+    lines: list[str] = []
+    lines.append(f"WiseOrder daily summary — {now.strftime('%Y-%m-%d')} (last 24 hours).")
+    lines.append("")
+
+    # ---- 1. What changed ----
+    lines.append("**What changed**")
+    if completed == 0 and failed == 0 and interrupted == 0 and running == 0:
+        lines.append("nothing — the runtime was idle.")
     else:
         parts = []
         parts.append(f"{completed} workflow(s) completed")
@@ -288,67 +294,109 @@ def _format_summary(s: DailyStats, now: datetime) -> str:
         if running:
             parts.append(f"{running} still running")
         lines.append(", ".join(parts) + ".")
-
-    if pending_approvals:
-        lines.append(
-            f"{pending_approvals} approval card(s) pending — open the dashboard."
-        )
-
-    if s.approvals_decided:
-        ratio = (
-            "all approved" if s.approvals_rejected == 0
-            else "all rejected" if s.approvals_approved == 0
-            else f"{s.approvals_approved} approved, {s.approvals_rejected} rejected"
-        )
-        lines.append(f"{s.approvals_decided} approval(s) decided ({ratio}).")
-
-    # Queue health
-    if s.queue_depth_failed:
-        lines.append(
-            f"Dead-letter queue has {s.queue_depth_failed} job(s) — "
-            f"check /queues/failed."
-        )
-    if s.queue_depth_high or s.queue_depth_normal:
-        lines.append(
-            f"Live queues: {s.queue_depth_high} high-priority, "
-            f"{s.queue_depth_normal} normal-priority."
-        )
-
-    # Failure breakdown
-    if s.most_common_failure_types:
-        most = s.most_common_failure_types[0]
-        if len(s.most_common_failure_types) == 1:
-            lines.append(f"Failures were dominated by `{most[0]}` ({most[1]} task(s)).")
-        else:
-            lines.append(
-                f"Top failure shapes: " +
-                ", ".join(f"`{kind}` ({n})" for kind, n in s.most_common_failure_types[:3])
-                + "."
-            )
-
-    # Logs
-    if s.error_log_lines_count:
-        lines.append(
-            f"`logs/wiseorder.jsonl` has {s.error_log_lines_count} ERROR-level line(s) in the recent tail."
-        )
-
-    # Recommended action
+        if s.most_common_workflow_names:
+            top = s.most_common_workflow_names[0]
+            lines.append(f"most common: `{top[0]}` ({top[1]}x).")
     lines.append("")
+
+    # ---- 2. What failed ----
+    lines.append("**What failed**")
+    if not failed and not s.queue_depth_failed and not s.most_common_failure_types and not s.error_log_lines_count:
+        lines.append("nothing.")
+    else:
+        if failed:
+            lines.append(f"{failed} workflow(s) marked failed.")
+        if s.queue_depth_failed:
+            lines.append(
+                f"dead-letter queue holds {s.queue_depth_failed} job(s); see "
+                f"`GET /queues/failed`."
+            )
+        if s.most_common_failure_types:
+            top_n = s.most_common_failure_types[:3]
+            if len(top_n) == 1:
+                lines.append(f"failure shape: `{top_n[0][0]}` ({top_n[0][1]} task(s)).")
+            else:
+                lines.append(
+                    "top failure shapes: " +
+                    ", ".join(f"`{k}` ({n})" for k, n in top_n) + "."
+                )
+        if s.error_log_lines_count:
+            lines.append(
+                f"`logs/wiseorder.jsonl` has {s.error_log_lines_count} "
+                f"ERROR-level line(s) in the recent tail."
+            )
+    lines.append("")
+
+    # ---- 3. What matters most ----
+    lines.append("**What matters most**")
+    matter_lines = []
     if pending_approvals:
-        lines.append("Recommended action: review the pending approvals first.")
-    elif failed or s.queue_depth_failed:
+        matter_lines.append(
+            f"{pending_approvals} pending approval card(s) — operator action required."
+        )
+    if interrupted:
+        matter_lines.append(
+            f"{interrupted} interrupted workflow(s) — possible orchestrator restart."
+        )
+    if s.queue_depth_failed:
+        matter_lines.append(
+            f"{s.queue_depth_failed} dead-letter job(s) — investigate or discard."
+        )
+    if running > 5:
+        matter_lines.append(
+            f"{running} workflows in 'running' state — verify they are actually progressing."
+        )
+    if not matter_lines:
+        matter_lines.append("nothing urgent.")
+    for ml in matter_lines:
+        lines.append(ml)
+    lines.append("")
+
+    # ---- 4. Recommended next action ----
+    lines.append("**Recommended next action**")
+    if pending_approvals:
         lines.append(
-            "Recommended action: triage the dead-letter queue and the failed workflows."
+            "Review pending approvals first. Each card carries the engineering "
+            "summary, social draft, and risk level."
+        )
+    elif s.queue_depth_failed or failed:
+        lines.append(
+            "Triage the dead-letter queue and failed workflows. "
+            "`GET /queues/failed` lists each with timestamped error notes."
         )
     elif interrupted:
         lines.append(
-            "Recommended action: investigate why workflow(s) were interrupted "
-            "(orchestrator restart, crash, or stale running > max-age)."
+            "Investigate why workflow(s) were interrupted. Likely causes: "
+            "orchestrator restart, host crash, or workflow stuck in 'running' past max-age."
+        )
+    elif running:
+        lines.append(
+            "Confirm in-flight workflows are progressing. "
+            "`GET /workflows/{id}` shows the per-task chain."
         )
     else:
-        lines.append("Recommended action: none. The runtime is in a clean state.")
+        lines.append("None. The runtime is in a clean state.")
+    lines.append("")
 
-    return "\n".join(lines)
+    # ---- 5. Approval backlog ----
+    lines.append("**Approval backlog**")
+    if pending_approvals == 0 and s.approvals_decided == 0:
+        lines.append("no approvals in the last 24h.")
+    else:
+        approved = s.approvals_approved
+        rejected = s.approvals_rejected
+        bits = []
+        bits.append(f"{pending_approvals} pending")
+        if s.approvals_decided:
+            decided_summary = (
+                f"all {s.approvals_decided} approved" if rejected == 0
+                else f"all {s.approvals_decided} rejected" if approved == 0
+                else f"{approved} approved, {rejected} rejected"
+            )
+            bits.append(f"{s.approvals_decided} decided ({decided_summary})")
+        lines.append("; ".join(bits) + ".")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # ---------------------------------------------------------------------------
