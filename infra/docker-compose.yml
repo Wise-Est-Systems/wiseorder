@@ -1,0 +1,53 @@
+# STACK_001 — Postgres + Redis with persistent volumes + healthchecks.
+#
+# Run from this directory: `docker compose up -d`.
+# Or via the bootstrap script: `./bootstrap.sh` (preferred — adds wait + verify).
+#
+# Ports are deliberately non-default to avoid colliding with any other
+# Postgres / Redis you might be running:
+#   Postgres: host 5433 -> container 5432
+#   Redis:    host 6380 -> container 6379
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wiseorder-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wiseorder
+      POSTGRES_PASSWORD: wiseorder
+      POSTGRES_DB: wiseorder
+    ports:
+      - "5433:5432"
+    volumes:
+      - wiseorder_pg_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wiseorder -d wiseorder"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: wiseorder-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - wiseorder_redis_data:/data
+    # appendonly = AOF persistence on; everysec fsync (default) means
+    # at most 1 second of data loss on hard crash.
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+volumes:
+  # Named volumes survive container recreation. Wipe with `docker compose down -v`.
+  wiseorder_pg_data:
+  wiseorder_redis_data:

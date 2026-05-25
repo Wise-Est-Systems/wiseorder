@@ -129,6 +129,58 @@ def build_app(orch: "Orchestrator") -> FastAPI:
             raise HTTPException(404, "approval not found")
         return {"approval_id": approval_id, "decision": body.decision}
 
+    @app.get("/watchers")
+    async def watchers_status() -> dict:
+        """Status of background watchers running inside the orchestrator.
+
+        Today returns IntegrityWatcher state (poll history + current head).
+        """
+        iw = getattr(orch, "integrity_watcher", None)
+        if iw is None:
+            return {"integrity_watcher": {"status": "not_running", "history": []}}
+        history = [h.to_dict() for h in iw.history[-20:]]
+        return {
+            "integrity_watcher": {
+                "status": "running",
+                "chain_dir": str(iw.chain_dir),
+                "interval_seconds": iw.interval_seconds,
+                "last_known_head": iw.last_head,
+                "history": history,
+            }
+        }
+
+    @app.get("/summary/latest")
+    async def latest_daily_summary() -> dict:
+        """The most recent daily-summary memory row. Returns
+        {"available": False, ...} if none has been generated yet."""
+        async with session_scope() as session:
+            row = (await session.execute(
+                select(Memory)
+                .where(Memory.category == "daily_summary")
+                .order_by(desc(Memory.id))
+                .limit(1)
+            )).scalar_one_or_none()
+            if row is None:
+                return {"available": False, "reason": "no_summary_yet"}
+            return {
+                "available": True,
+                "id": row.id,
+                "date": row.meta.get("date") if row.meta else None,
+                "summary": row.content,
+                "stats": row.meta.get("stats") if row.meta else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+
+    @app.post("/summary/run-now", dependencies=[Depends(_require_token)])
+    async def run_summary_now() -> dict:
+        """Manually trigger the daily-summary worker (operator action).
+
+        Idempotent: if today's summary already exists, returns the
+        existing record without re-running. Auth-gated when
+        WISEORDER_API_AUTH_TOKEN is set."""
+        from workflows.daily_summary import run_daily_summary
+        return await run_daily_summary()
+
     @app.get("/memory/search")
     async def memory_search(q: str, n: int = 5) -> list[dict]:
         return get_vector_store().query(q, n_results=n)
@@ -270,8 +322,12 @@ input{background:#11161c;border:1px solid #2a3a4d;color:#dde2e7;padding:6px 8px;
 <body>
 <h1>WISEORDER RUNTIME v0.1</h1>
 <div id="stats" class="grid"></div>
+<h2>DAILY SUMMARY</h2>
+<div id="summary"></div>
 <h2>PENDING APPROVALS</h2>
 <div id="approvals"></div>
+<h2>WATCHERS</h2>
+<div id="watchers"></div>
 <h2>DEAD-LETTER (FAILED JOBS)</h2>
 <div id="failed"></div>
 <h2>RECENT WORKFLOWS</h2>
@@ -293,6 +349,21 @@ async function refresh(){
     <div class="card"><div class="k">WORKFLOWS</div><pre>${esc(JSON.stringify(s.workflows,null,2))}</pre></div>
     <div class="card"><div class="k">QUEUES</div><pre>${esc(JSON.stringify(s.queues,null,2))}</pre></div>
     <div class="card"><div class="k">VECTOR MEMORY</div><div class="v">${s.vector_count} items</div></div>`
+  const sm=await j('/summary/latest')
+  document.getElementById('summary').innerHTML = sm.available ? `
+    <div class="card">
+      <div class="k">${esc(sm.date||'')}</div>
+      <pre>${esc(sm.summary||'')}</pre>
+    </div>` : '<div class="card k">no daily summary yet (will be generated at 09:00 UTC; or POST /summary/run-now to force)</div>'
+  const wsr=await j('/watchers')
+  const iw=wsr.integrity_watcher||{}
+  const last=(iw.history||[]).slice(-3).reverse()
+  document.getElementById('watchers').innerHTML = iw.status==='running' ? `
+    <div class="card">
+      <div class="k">integrity_watcher · ${esc(iw.chain_dir)} · poll ${esc(iw.interval_seconds)}s</div>
+      <div>head: <span class="v">${esc(iw.last_known_head||'(none)')}</span></div>
+      <pre>${esc(last.map(h=>h.ts.slice(11,19)+' '+h.status+' count='+h.count+(h.note?' note='+h.note:'')).join('\\n'))}</pre>
+    </div>` : '<div class="card k">integrity_watcher not running</div>'
   const ap=await j('/approvals?pending=true')
   document.getElementById('approvals').innerHTML=ap.length?ap.map(a=>`
     <div class="card">

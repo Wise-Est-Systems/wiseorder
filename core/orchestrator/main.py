@@ -16,7 +16,9 @@ from core.memory.db import init_db, ping as db_ping, session_scope
 from core.memory.models import Task, Workflow
 from core.queues import QueueName, get_queue
 from core.queues.redis_queue import Job
+from core.watchers.integrity_watcher import IntegrityWatcher
 from workflows.commit_pipeline import run_commit_pipeline
+from workflows.daily_summary import schedule_daily_summary
 
 
 log = get_logger(__name__)
@@ -34,6 +36,9 @@ class Orchestrator:
         self._stop = asyncio.Event()
         self._workers: list[asyncio.Task] = []
         self._watcher: EventWatcher | None = None
+        self.integrity_watcher: IntegrityWatcher | None = None  # exposed for dashboard
+        self._integrity_task: asyncio.Task | None = None
+        self._daily_summary_task: asyncio.Task | None = None
         self._api_server: uvicorn.Server | None = None
         self._api_task: asyncio.Task | None = None
         self.register("commit_pipeline", run_commit_pipeline)
@@ -125,6 +130,16 @@ class Orchestrator:
         self._watcher = EventWatcher()
         self._watcher.start(loop)
 
+        # Background services: integrity watcher (polls protocol chain) +
+        # daily-summary scheduler (writes one summary per UTC day).
+        self.integrity_watcher = IntegrityWatcher()
+        self._integrity_task = asyncio.create_task(
+            self.integrity_watcher.run(), name="integrity-watcher"
+        )
+        self._daily_summary_task = asyncio.create_task(
+            schedule_daily_summary(), name="daily-summary-scheduler"
+        )
+
         self._api_task = asyncio.create_task(self._serve_api(), name="api-server")
         log.info({"msg": "orchestrator_ready", "api": f"http://{s.api_host}:{s.api_port}"})
 
@@ -133,6 +148,12 @@ class Orchestrator:
         self._stop.set()
         if self._watcher is not None:
             self._watcher.stop()
+        if self.integrity_watcher is not None:
+            self.integrity_watcher.stop()
+        if self._integrity_task is not None:
+            self._integrity_task.cancel()
+        if self._daily_summary_task is not None:
+            self._daily_summary_task.cancel()
         if self._api_server is not None:
             self._api_server.should_exit = True
         if self._api_task is not None:
@@ -142,6 +163,13 @@ class Orchestrator:
                 self._api_task.cancel()
         if self._workers:
             await asyncio.gather(*self._workers, return_exceptions=True)
+        # Await the background tasks to actually exit (they cancel cleanly)
+        for t in (self._integrity_task, self._daily_summary_task):
+            if t is not None:
+                try:
+                    await asyncio.wait_for(t, timeout=3)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
         q = await get_queue()
         await q.close()
         log.info({"msg": "orchestrator_stopped"})
