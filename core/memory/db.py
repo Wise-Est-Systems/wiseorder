@@ -51,14 +51,35 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
 
 
 async def init_db() -> None:
-    """Create tables if they don't exist. Safe to run repeatedly.
+    """Run Alembic migrations to bring the schema to head. Safe to run
+    repeatedly (Alembic tracks applied revisions in the ``alembic_version``
+    table).
 
-    Migrations/001_init.sql is the source of truth when Postgres is bootstrapped
-    via docker-compose; this is a safety net for ad-hoc setups.
+    Production-grade replacement for ``Base.metadata.create_all`` — schema
+    evolution now goes through versioned migrations under ``alembic/versions/``.
     """
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    import asyncio
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    cfg_path = repo_root / "alembic.ini"
+    if not cfg_path.is_file():
+        # Fallback to create_all only when running outside the packaged repo
+        # (e.g., a developer building objects in-memory). Production paths
+        # always have alembic.ini present.
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        return
+
+    # Alembic's command.upgrade is sync. Run it in a thread so we don't
+    # block the event loop and so it can manage its own DB connections
+    # without competing with our async pool.
+    cfg = Config(str(cfg_path))
+    await asyncio.to_thread(command.upgrade, cfg, "head")
 
 
 async def ping() -> bool:
