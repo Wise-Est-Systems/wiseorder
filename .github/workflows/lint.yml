@@ -1,0 +1,56 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.7.4
+
+      - name: ruff check
+        run: ruff check core/ agents/ workflows/ api/ configs/ tests/
+        continue-on-error: true
+
+      - name: ruff format --check
+        run: ruff format --check core/ agents/ workflows/ api/ configs/
+        continue-on-error: true
+
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime + mypy
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install mypy==1.13.0
+
+      - name: mypy (lenient — informational only)
+        run: |
+          mypy --ignore-missing-imports --no-strict-optional \
+               configs/ core/queues/dedup.py core/orchestrator/main.py \
+               workflows/commit_pipeline.py 2>&1 | head -40
+        continue-on-error: true

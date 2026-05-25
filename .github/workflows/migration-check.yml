@@ -1,0 +1,90 @@
+name: migration-check
+
+on:
+  push:
+    paths:
+      - "alembic/**"
+      - "core/memory/**"
+      - "migrations/**"
+      - ".github/workflows/migration-check.yml"
+  pull_request:
+
+jobs:
+  migrate:
+    name: alembic upgrade head from empty schema
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wiseorder
+          POSTGRES_PASSWORD: wiseorder
+          POSTGRES_DB: wiseorder
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U wiseorder -d wiseorder"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Wait for Postgres
+        env:
+          PGPASSWORD: wiseorder
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5433 -U wiseorder -d wiseorder >/dev/null 2>&1; then
+              echo "Postgres ready after $i tries"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Postgres did not become ready"; exit 1
+
+      - name: alembic upgrade head (initial)
+        env:
+          WISEORDER_DATABASE_URL: postgresql+asyncpg://wiseorder:wiseorder@localhost:5433/wiseorder
+        run: alembic upgrade head
+
+      - name: alembic upgrade head (re-run — must be idempotent)
+        env:
+          WISEORDER_DATABASE_URL: postgresql+asyncpg://wiseorder:wiseorder@localhost:5433/wiseorder
+        run: alembic upgrade head
+
+      - name: Verify tables exist
+        env:
+          PGPASSWORD: wiseorder
+        run: |
+          tables=$(psql -h localhost -p 5433 -U wiseorder -d wiseorder -At \
+            -c "SELECT table_name FROM information_schema.tables \
+                WHERE table_schema='public' ORDER BY table_name")
+          echo "$tables"
+          for t in alembic_version approvals memory tasks workflows; do
+            echo "$tables" | grep -q "^$t$" || { echo "missing table: $t"; exit 1; }
+          done
+          echo "OK: all expected tables present"
+
+      - name: alembic downgrade base (verify reversibility)
+        env:
+          WISEORDER_DATABASE_URL: postgresql+asyncpg://wiseorder:wiseorder@localhost:5433/wiseorder
+        run: alembic downgrade base
+
+      - name: alembic upgrade head (after downgrade — full round trip)
+        env:
+          WISEORDER_DATABASE_URL: postgresql+asyncpg://wiseorder:wiseorder@localhost:5433/wiseorder
+        run: alembic upgrade head
