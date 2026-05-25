@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -32,7 +33,8 @@ def _require_token(
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bearer token required")
     presented = authorization[len("Bearer "):]
-    if presented != expected:
+    # Constant-time compare: prevents timing-side-channel inference of the token.
+    if not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "invalid token")
 
 

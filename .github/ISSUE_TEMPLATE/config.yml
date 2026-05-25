@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Wise-Est-Systems/wiseorder-protocol/security/advisories/new
+    about: Report a security issue privately. Do NOT open a public issue.
+  - name: Spec change request
+    url: https://github.com/Wise-Est-Systems/wiseorder-protocol/issues/new?labels=spec-change&template=
+    about: Propose a change to SPEC.md, SPEC_LOCK_v*.md, or vectors/v*.
