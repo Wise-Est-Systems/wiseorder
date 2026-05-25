@@ -90,6 +90,28 @@ docker compose down                       # stop containers; data volumes surviv
 docker compose down -v                    # WIPE data — Postgres + Redis lose everything
 ```
 
+## Security posture
+
+The API binds to `127.0.0.1` by default. **Anything else requires explicit opt-in.**
+
+| state | what happens at startup |
+|---|---|
+| `WISEORDER_API_HOST=127.0.0.1` (default) | starts normally; no auth required |
+| `WISEORDER_API_HOST=0.0.0.0` and `WISEORDER_API_ALLOW_REMOTE_BIND=false` | **REFUSES to start.** Loud error. |
+| `WISEORDER_API_HOST=0.0.0.0`, `WISEORDER_API_ALLOW_REMOTE_BIND=true`, `WISEORDER_API_AUTH_TOKEN=""` | **REFUSES to start.** Won't expose unauthenticated mutations. |
+| `WISEORDER_API_HOST=0.0.0.0`, both vars set | starts with warning; `POST /trigger` and `POST /approvals/{id}/decide` require `Authorization: Bearer <token>` |
+
+When the auth token is set, mutating endpoints check the header:
+```
+curl -X POST :8765/trigger -H "Authorization: Bearer YOUR_TOKEN" -H 'content-type: application/json' -d '...'
+```
+GET endpoints remain open (they don't change state). The dashboard works at localhost without a token regardless.
+
+Generate a token:
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
 ## Tuning knobs (env vars, all `WISEORDER_*` prefixed)
 
 | var | default | meaning |
@@ -98,9 +120,12 @@ docker compose down -v                    # WIPE data — Postgres + Redis lose 
 | `WISEORDER_LLM_TIMEOUT_SECONDS` | 60.0 | Hard cap on each LLM call. |
 | `WISEORDER_LLM_MAX_RETRIES` | 2 | Retry budget on transient LLM failures. |
 | `WISEORDER_ORPHAN_WORKFLOW_MAX_AGE_SECONDS` | 600 | A `running` workflow older than this at startup is `interrupted`. |
+| `WISEORDER_DEDUP_TTL_SECONDS` | 3600 | Redis SETNX claim TTL on (repo, sha). |
 | `WISEORDER_WATCH_PATHS` | `""` | Comma-separated absolute paths to repos to watch. |
 | `WISEORDER_API_HOST` | `127.0.0.1` | Bind only to localhost by default. |
 | `WISEORDER_API_PORT` | `8765` | |
+| `WISEORDER_API_ALLOW_REMOTE_BIND` | `false` | Required for non-loopback binds. |
+| `WISEORDER_API_AUTH_TOKEN` | `""` | Bearer token; required when remote-binding. |
 | `WISEORDER_DISCORD_WEBHOOK_URL` | `""` | Optional approval delivery. |
 | `WISEORDER_TELEGRAM_BOT_TOKEN` + `_CHAT_ID` | `""` | Optional approval delivery. |
 | `WISEORDER_LOG_LEVEL` | `INFO` | Standard Python log levels. |

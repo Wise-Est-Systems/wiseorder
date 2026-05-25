@@ -81,6 +81,7 @@ class Orchestrator:
         from api.server import build_app
 
         s = get_settings()
+        _validate_bind_safety(s.api_host, s.api_allow_remote_bind, s.api_auth_token)
         app = build_app(self)
         config = uvicorn.Config(
             app,
@@ -150,6 +151,40 @@ class Orchestrator:
         job = Job.new(type=type, payload=payload)
         await q.enqueue(job, queue=QueueName.HIGH)
         return job.id
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _validate_bind_safety(host: str, allow_remote: bool, auth_token: str) -> None:
+    """Refuse to start with an unsafe bind configuration.
+
+    Rules:
+      * Loopback (127.0.0.1, localhost, ::1) is always allowed.
+      * Any other bind requires both ``WISEORDER_API_ALLOW_REMOTE_BIND=true``
+        AND a non-empty ``WISEORDER_API_AUTH_TOKEN``. The token gates every
+        endpoint except the dashboard and health probes (see api/server.py).
+      * Without the token, remote-bind is refused even if allow_remote=true,
+        because the dashboard's POST endpoints (approvals/decide, trigger)
+        would otherwise be unauthenticated on a public interface.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return
+    if not allow_remote:
+        raise RuntimeError(
+            f"refusing to bind API to non-loopback host {host!r}. "
+            f"Set WISEORDER_API_ALLOW_REMOTE_BIND=true to opt in."
+        )
+    if not auth_token:
+        raise RuntimeError(
+            f"refusing to bind API to {host!r} without auth. "
+            f"Set WISEORDER_API_AUTH_TOKEN to a non-empty secret first."
+        )
+    log.warning({
+        "msg": "api_bound_to_remote_interface",
+        "host": host,
+        "hint": "endpoints with side effects require Authorization: Bearer <token>",
+    })
 
 
 async def reap_orphan_workflows(max_age_seconds: int) -> int:

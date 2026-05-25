@@ -2,16 +2,38 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 
+from configs.settings import get_settings
 from core.approvals.gateway import get_gateway
 from core.memory.db import ping as db_ping, session_scope
 from core.memory.models import Approval, Memory, Task, Workflow
 from core.memory.vector import get_vector_store
 from core.queues import QueueName, get_queue
+
+
+def _require_token(
+    authorization: str | None = Header(default=None),
+) -> None:
+    """Reject mutating requests if WISEORDER_API_AUTH_TOKEN is set and the
+    Authorization header does not carry a matching bearer token.
+
+    When the env var is empty, this dependency is a no-op (preserves the
+    friction-free localhost workflow). When set, every mutating endpoint
+    (POST /trigger, POST /approvals/{id}/decide) must include
+    ``Authorization: Bearer <token>``.
+    """
+    expected = get_settings().api_auth_token
+    if not expected:
+        return
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bearer token required")
+    presented = authorization[len("Bearer "):]
+    if presented != expected:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "invalid token")
 
 
 if TYPE_CHECKING:
@@ -95,7 +117,10 @@ def build_app(orch: "Orchestrator") -> FastAPI:
             rows = (await session.execute(stmt)).scalars().all()
             return [_approval_dict(r) for r in rows]
 
-    @app.post("/approvals/{approval_id}/decide")
+    @app.post(
+        "/approvals/{approval_id}/decide",
+        dependencies=[Depends(_require_token)],
+    )
     async def decide_approval(approval_id: int, body: DecisionBody) -> dict:
         ok = await get_gateway().decide(approval_id, body.decision)
         if not ok:
@@ -171,7 +196,10 @@ def build_app(orch: "Orchestrator") -> FastAPI:
             "vector_count": _safe_vector_count(),
         }
 
-    @app.post("/trigger")
+    @app.post(
+        "/trigger",
+        dependencies=[Depends(_require_token)],
+    )
     async def trigger(body: TriggerBody) -> dict:
         job_id = await orch.enqueue_manual(body.type, body.payload)
         return {"job_id": job_id}
