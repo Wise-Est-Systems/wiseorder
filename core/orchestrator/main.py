@@ -16,9 +16,11 @@ from core.memory.db import init_db, ping as db_ping, session_scope
 from core.memory.models import Task, Workflow
 from core.queues import QueueName, get_queue
 from core.queues.redis_queue import Job
+from core.watchers.ci_watcher import CIWatcher
 from core.watchers.integrity_watcher import IntegrityWatcher
 from workflows.commit_pipeline import run_commit_pipeline
 from workflows.daily_summary import schedule_daily_summary
+from workflows.demo_forge import run_demo_forge_request
 
 
 log = get_logger(__name__)

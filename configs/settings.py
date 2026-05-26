@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import List
+from typing import Annotated, List
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    watch_paths: List[str] = Field(default_factory=list)
+    # NoDecode: prevents pydantic-settings from trying to JSON-decode the
+    # raw env string before our validator runs. Lets us accept the simple
+    # `WISEORDER_WATCH_PATHS=/a,/b` shape from .env files.
+    watch_paths: Annotated[List[str], NoDecode] = Field(default_factory=list)
 
     api_host: str = "127.0.0.1"
     api_port: int = 8765
