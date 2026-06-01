@@ -50,7 +50,14 @@ test:
 	$(PYTHON) -m pytest tests/ -v --tb=short
 
 test-pure:
-	$(PYTHON) -m pytest tests/test_smoke.py tests/test_hardening_v2.py -v --tb=short -m "not services_required"
+	$(PYTHON) -m pytest tests/test_smoke.py tests/test_hardening_v2.py tests/test_distribution_smoke.py -v --tb=short -m "not services_required"
+
+distribute-bootstrap:
+	.venv/bin/python -m pip install playwright pytest-asyncio
+	.venv/bin/python -m playwright install chromium
+
+distribute-test:
+	$(PYTHON) -m pytest tests/test_distribution_smoke.py -v --tb=short -m "not services_required"
 
 lint:
 	$(PYTHON) -m ruff check core/ agents/ workflows/ api/ configs/ tests/
