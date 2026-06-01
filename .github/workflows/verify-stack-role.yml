@@ -1,0 +1,20 @@
+name: verify-stack-role
+
+on:
+  push:
+    paths:
+      - 'STACK_ROLE.md'
+      - 'scripts/verify_stack_role.sh'
+      - '.github/workflows/verify-stack-role.yml'
+  pull_request:
+    paths:
+      - 'STACK_ROLE.md'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify STACK_ROLE.md against wiseorder-protocol/STRUCTURE.md
+        run: bash scripts/verify_stack_role.sh wiseorder
