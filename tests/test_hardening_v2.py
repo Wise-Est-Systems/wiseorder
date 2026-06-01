@@ -88,6 +88,7 @@ async def redis_or_skip():
     yield
 
 
+@pytest.mark.services_required
 async def test_dedup_acquire_blocks_second_claim(redis_or_skip) -> None:
     from datetime import datetime, timezone
 
@@ -111,6 +112,7 @@ async def test_dedup_acquire_blocks_second_claim(redis_or_skip) -> None:
         await release("/tmp/test", sha)
 
 
+@pytest.mark.services_required
 async def test_dedup_release_allows_reclaim(redis_or_skip) -> None:
     from datetime import datetime, timezone
 

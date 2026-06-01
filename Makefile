@@ -22,8 +22,8 @@ help:
 
 bootstrap:
 	python3.12 -m venv .venv
-	$(PIP) install --upgrade pip
-	$(PIP) install -e ".[dev]"
+	.venv/bin/python -m pip install --upgrade pip
+	.venv/bin/python -m pip install -e ".[dev]"
 	@echo "OK: .venv ready. Activate with: source .venv/bin/activate"
 
 services-up:
@@ -50,7 +50,7 @@ test:
 	$(PYTHON) -m pytest tests/ -v --tb=short
 
 test-pure:
-	$(PYTHON) -m pytest tests/test_smoke.py tests/test_hardening.py tests/test_hardening_v2.py -v --tb=short
+	$(PYTHON) -m pytest tests/test_smoke.py tests/test_hardening_v2.py -v --tb=short -m "not services_required"
 
 lint:
 	$(PYTHON) -m ruff check core/ agents/ workflows/ api/ configs/ tests/

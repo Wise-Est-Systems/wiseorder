@@ -42,3 +42,6 @@ include = ["core*", "agents*", "workflows*", "integrations*", "api*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "services_required: tests that require Postgres or Redis to be running (excluded from test-pure)",
+]
