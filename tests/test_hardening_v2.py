@@ -56,7 +56,7 @@ def test_alembic_revision_chain_parses() -> None:
     revs = list(script.walk_revisions())
     assert len(revs) >= 1
     head = script.get_current_head()
-    assert head == "0001_initial"
+    assert head == "0002_distribution"
 
 
 def test_dedup_key_is_stable() -> None:

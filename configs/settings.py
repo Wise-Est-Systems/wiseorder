@@ -13,7 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(REPO_ROOT / ".env"),
+        env_file=(
+            str(REPO_ROOT / ".env"),
+            str(REPO_ROOT / ".env.distribution"),
+        ),
         env_file_encoding="utf-8",
         env_prefix="WISEORDER_",
         extra="ignore",
@@ -47,6 +50,23 @@ class Settings(BaseSettings):
 
     api_allow_remote_bind: bool = False
     api_auth_token: str = ""
+
+    # --- distribution pipeline (workflows/distribution_pipeline.py) ---
+    distribution_drafter_model: str = ""  # falls back to llm_model when empty
+
+    # Hacker News adapter (Playwright-driven; HN has no submit API)
+    hn_username: str = ""
+    hn_password: str = ""
+    hn_playwright_headless: bool = True
+
+    # Email outreach adapter (SMTP send + IMAP monitor)
+    outreach_smtp_host: str = ""
+    outreach_smtp_port: int = 465
+    outreach_smtp_username: str = ""
+    outreach_smtp_password: str = ""
+    outreach_from_address: str = ""
+    outreach_imap_host: str = ""
+    outreach_imap_port: int = 993
 
     @field_validator("watch_paths", mode="before")
     @classmethod
