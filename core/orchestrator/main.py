@@ -21,10 +21,14 @@ from core.watchers.integrity_watcher import IntegrityWatcher
 from workflows.commit_pipeline import run_commit_pipeline
 from workflows.daily_summary import schedule_daily_summary
 from workflows.demo_forge import run_demo_forge_request
+from workflows.cross_post_pipeline import run_cross_post_pipeline
+from workflows.distribution.adapters.devto import DevToAdapter
 from workflows.distribution.adapters.email_outreach import EmailOutreachAdapter
 from workflows.distribution.adapters.hacker_news import HackerNewsAdapter
+from workflows.distribution.adapters.mastodon import MastodonAdapter
 from workflows.distribution.registry import get_registry as get_distribution_registry
 from workflows.distribution_pipeline import run_distribution_pipeline
+from workflows.mention_monitor_pipeline import run_mention_monitor_pipeline
 
 
 log = get_logger(__name__)
@@ -52,6 +56,8 @@ class Orchestrator:
         self.register("commit_pipeline", run_commit_pipeline)
         self.register("demo_request", run_demo_forge_request)
         self.register("distribution_pipeline", run_distribution_pipeline)
+        self.register("cross_post_pipeline", run_cross_post_pipeline)
+        self.register("mention_monitor_pipeline", run_mention_monitor_pipeline)
         self._register_distribution_adapters()
 
     def _register_distribution_adapters(self) -> None:
@@ -60,6 +66,8 @@ class Orchestrator:
             return  # idempotent: skip if a prior Orchestrator already registered
         registry.register(HackerNewsAdapter())
         registry.register(EmailOutreachAdapter())
+        registry.register(MastodonAdapter())
+        registry.register(DevToAdapter())
 
     def register(self, job_type: str, fn: HandlerFn) -> None:
         self._handlers[job_type] = fn

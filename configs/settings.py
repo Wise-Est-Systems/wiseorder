@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     outreach_imap_host: str = ""
     outreach_imap_port: int = 993
 
+    # Mastodon adapter (free API; project-account on any instance)
+    mastodon_instance_url: str = ""  # e.g., "https://fosstodon.org"
+    mastodon_access_token: str = ""
+    mastodon_default_visibility: str = "public"  # public | unlisted | private | direct
+
+    # dev.to adapter (long-form blog cross-publishing)
+    devto_api_key: str = ""
+
     @field_validator("watch_paths", mode="before")
     @classmethod
     def _split_paths(cls, v):
