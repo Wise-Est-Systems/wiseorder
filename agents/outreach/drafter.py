@@ -28,6 +28,13 @@ EMAIL_SYSTEM = (
     "schema described in the user message."
 )
 
+POST_SYSTEM = (
+    "You draft public posts for an infrastructure project's social and "
+    "blog presence. Voice: clean, declarative, no manifesto, no hype, no "
+    "marketing copy. Never reference private personal motives. Respond "
+    "ONLY with valid JSON matching the schema described in the user message."
+)
+
 
 class OutreachDrafter:
     """Draft generator for the distribution pipeline.
@@ -95,6 +102,61 @@ class OutreachDrafter:
         return (
             str(data.get("subject", "")).strip(),
             str(data.get("body", "")).strip(),
+        )
+
+    async def draft_mastodon_post(
+        self,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str]:
+        url = str(payload.get("url") or "").strip()
+        if not url:
+            raise ValueError("draft_mastodon_post: payload['url'] is required")
+        user_prompt = (
+            "Draft a Mastodon post (toot) for the artifact below.\n\n"
+            f"event_type: {event_type}\n"
+            f"url:        {url}\n"
+            f"summary:    {payload.get('summary', '')}\n"
+            f"context:    {payload.get('context', '')}\n\n"
+            "Return JSON with exactly these keys:\n"
+            "  body — string, <=480 chars (leave room for url + ellipsis), plain text, no markdown. "
+            "Include the url somewhere in the body. Use 1-3 relevant hashtags maximum at the end "
+            "(e.g. #cryptography #ai). No CW spoiler tags unless the content is genuinely sensitive."
+        )
+        data = await self._json_call(system=POST_SYSTEM, user=user_prompt, max_tokens=512)
+        return (str(data.get("body", "")).strip(), url)
+
+    async def draft_blog_post(
+        self,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        """Returns (title, body_markdown, canonical_url)."""
+        canonical_url = str(payload.get("url") or "").strip()
+        if not canonical_url:
+            raise ValueError("draft_blog_post: payload['url'] (canonical_url) is required")
+        user_prompt = (
+            "Draft a long-form engineering blog post for the artifact below. The post will "
+            "be cross-published with a canonical-url pointer back to the source URL so this "
+            "platform does NOT outrank the source in search.\n\n"
+            f"event_type: {event_type}\n"
+            f"canonical_url: {canonical_url}\n"
+            f"summary:       {payload.get('summary', '')}\n"
+            f"context:       {payload.get('context', '')}\n\n"
+            "Return JSON with exactly these keys:\n"
+            "  title         — string, <=80 chars, no clickbait, declarative\n"
+            "  body_markdown — string, 400-1200 words, valid Markdown. Sections: a 1-paragraph "
+            "lede that states what was built and why a reader should care, a 'How it works' "
+            "section with at most one code block, a 'What it does NOT do' section listing "
+            "non-goals honestly, a closing one-paragraph 'Where to look next' with links."
+        )
+        data = await self._json_call(system=POST_SYSTEM, user=user_prompt, max_tokens=4096)
+        return (
+            str(data.get("title", "")).strip(),
+            str(data.get("body_markdown", "")).strip(),
+            canonical_url,
         )
 
     async def _json_call(
